@@ -40,45 +40,44 @@ const { useState, useEffect, useCallback, useRef } = React;
 const SB_URL  = 'https://aozlomhzpvjfkjbjttwr.supabase.co';
 const SB_ANON = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImFvemxvbWh6cHZqZmtqYmp0dHdyIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzYzMzk3MTgsImV4cCI6MjA5MTkxNTcxOH0.l-wRtmPUDfu_R7x1EIyBfmZhBsfJNbUnMi073YOoUTM';
 
-/* Storage base URL：get_public_url 已回傳完整 URL，此處作為 fallback 拼接 */
 const SB_STORAGE_BASE = `${SB_URL}/storage/v1/object/public/question-images`;
 const imgSrc = url => !url ? null : url.startsWith('http') ? url : `${SB_STORAGE_BASE}/${url}`;
 
-/* 圖片關鍵字（與 upload_exams.py 同步） */
-const IMG_KW = /附圖|附表|如圖|如附圖|如附表|下圖|右圖|左圖|上圖|如表|下表|示意圖/;
-const needsImg = q => !!(q.has_image || q.is_placeholder || IMG_KW.test(q.text || ''));
-
-/* 安全答案轉 index：A→0 B→1 C→2 D→3；數字1-4兼容；null→-1 */
-const ANS_IDX = { A:0, B:1, C:2, D:3 };
-const toIdx = a => {
-  if (a == null || a === '') return -1;
-  const s = String(a).trim().toUpperCase();
-  if (ANS_IDX[s] !== undefined) return ANS_IDX[s];
-  const n = parseInt(s);
-  return (n >= 1 && n <= 4) ? n - 1 : -1;
-};
-
 async function sbFetch(filters = {}, limit = 300) {
   const p = new URLSearchParams({
-    select: 'id,grade,year,semester,exam_term,subject,text,options,answer,explanation,image_url,has_image,is_placeholder',
-    limit:  String(limit),
+    select: 'id,school,grade,year,semester,exam_term,subject,text,options,answer,explanation,image_url,has_image,is_placeholder',
     order:  'id.asc',
   });
-  /* year=null 表示不限學年，不帶此 filter */
+  if (filters.school)    p.append('school',    `eq.${filters.school}`);
   if (filters.grade)     p.append('grade',     `eq.${filters.grade}`);
   if (filters.year)      p.append('year',      `eq.${filters.year}`);
   if (filters.semester)  p.append('semester',  `eq.${filters.semester}`);
   if (filters.exam_term) p.append('exam_term', `eq.${filters.exam_term}`);
   if (filters.subject)   p.append('subject',   `eq.${filters.subject}`);
-  const r = await fetch(`${SB_URL}/rest/v1/questions?${p}`, {
-    headers: { apikey: SB_ANON, Authorization: `Bearer ${SB_ANON}` }
-  });
-  if (!r.ok) throw new Error(`Supabase ${r.status}`);
-  return r.json();
+
+  // offset 分頁：每輪取 PAGE 筆，拿到 0 筆才停，
+  // 不依賴 status code，可突破任何 max-rows 設定
+  const PAGE   = 100;
+  const all    = [];
+  let   offset = 0;
+  while (all.length < limit) {
+    p.set('limit',  String(PAGE));
+    p.set('offset', String(offset));
+    const r = await fetch(`${SB_URL}/rest/v1/questions?${p}`, {
+      headers: { apikey: SB_ANON, Authorization: `Bearer ${SB_ANON}` }
+    });
+    if (!r.ok) throw new Error(`Supabase ${r.status}`);
+    const page = await r.json();
+    if (!Array.isArray(page) || page.length === 0) break;
+    all.push(...page);
+    offset += page.length;   // 以實際回傳數前進
+  }
+  return all.slice(0, limit);
 }
 
 const shuffle = arr => [...arr].sort(() => Math.random() - 0.5);
 const LETTERS = ['A','B','C','D'];
+const ANS_IDX = { A:0, B:1, C:2, D:3 };
 
 /* ─── Icons ──────────────────────────────────────────────────────── */
 const Icon = ({ d, size=18, className='' }) => (
@@ -94,41 +93,29 @@ const CircleCheck = ({s=18,c=''}) => <Icon size={s} className={c} d={<><circle c
 const AlertIcon   = ({s=16}) => <Icon size={s} d={<><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></>}/>;
 const HomeIcon2   = ({s=16}) => <Icon size={s} d={<><path d="m3 9 9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></>}/>;
 const RetryIcon   = ({s=16}) => <Icon size={s} d={<><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/></>}/>;
-const ImageIcon   = ({s=16}) => <Icon size={s} d={<><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></>}/>;
-
-/* ─── QuestionImage：顯示圖片或 placeholder 提示 ─────────────────── */
-const QuestionImage = ({ q, compact=false }) => {
-  const src = imgSrc(q.image_url);
-  if (src) {
-    return (
-      <img src={src} alt="題目附圖"
-        className={`rounded-xl border border-gray-200 object-contain block mx-auto mb-4 ${compact ? 'max-h-48 max-w-xs' : 'w-full max-w-lg'}`}
-        onError={e => { e.target.style.display='none'; }}
-      />
-    );
-  }
-  if (needsImg(q)) {
-    return (
-      <div className={`flex items-center gap-2 text-amber-700 bg-amber-50 border border-amber-200 rounded-xl px-4 py-2.5 mb-4 ${compact ? 'text-xs' : 'text-sm'}`}>
-        <ImageIcon s={compact?13:15}/> 此題含附圖／附表，圖片尚待補充
-      </div>
-    );
-  }
-  return null;
-};
 
 /* ─── FilterBar ──────────────────────────────────────────────────── */
-const SUBJECTS = ['國文','英文','數學','自然','公民','歷史','地理'];
+const SUBJECTS = ['國文','英文','數學','自然','社會','公民','歷史','地理'];
+const SCHOOLS  = ['獅甲國中','新莊國中'];   // 新增學校時加進來，需與 questions.school 欄位完全一致
 
 const FilterBar = ({ fs, toggle }) => (
   <div className="sticky top-0 z-40 bg-white border-b border-gray-200 shadow-sm">
-    <div className="max-w-7xl mx-auto px-4 py-2.5 flex flex-wrap items-center gap-x-5 gap-y-2">
+    <div className="max-w-7xl mx-auto px-4 py-2.5 flex flex-wrap items-center gap-x-6 gap-y-2">
+
+      {/* 學校 */}
+      <div className="flex items-center gap-1.5">
+        <span className="text-[11px] font-bold text-slate-400 uppercase tracking-wide mr-0.5">學校</span>
+        {SCHOOLS.map(s => (
+          <button key={s} className={`filter-btn ${fs.school===s?'active':''}`}
+            onClick={() => toggle('school', s)}>{s}</button>
+        ))}
+      </div>
+
+      <div className="w-px h-5 bg-gray-200 hidden sm:block"/>
 
       {/* 學年度 */}
       <div className="flex items-center gap-1.5">
         <span className="text-[11px] font-bold text-slate-400 uppercase tracking-wide mr-0.5">學年</span>
-        <button className={`filter-btn ${fs.year===null?'active':''}`}
-          onClick={() => toggle('year', null)}>不限</button>
         {[113,114].map(y => (
           <button key={y} className={`filter-btn ${fs.year===y?'active':''}`}
             onClick={() => toggle('year', y)}>{y}</button>
@@ -265,35 +252,29 @@ const ResultPage = ({ questions, results, mode, onHome, onRetry }) => {
                 {wrong.map((r,ri)=>{
                   const q = questions.find(q=>q.id===r.id);
                   if (!q) return null;
-                  const ci = toIdx(q.answer);
+                  const ci = ANS_IDX[q.answer];
                   return (
                     <div key={r.id} className={`px-6 py-5 ${ri<wrong.length-1?'border-b border-gray-100':''} fade-in`}>
-                      <div className="flex gap-2 mb-2">
+                      <div className="flex gap-2 mb-3">
                         <span className="shrink-0 w-6 h-6 bg-red-100 text-red-600 rounded-full flex items-center justify-center text-xs font-bold">{ri+1}</span>
                         <p className="font-medium text-slate-700 text-sm leading-relaxed">{q.text}</p>
                       </div>
-                      <div className="ml-8 mb-2">
-                        <QuestionImage q={q} compact/>
-                      </div>
                       <div className="space-y-1.5 ml-8">
-                        {(q.options||[]).map((opt,idx)=>(
+                        {q.options.map((opt,idx)=>(
                           <div key={idx} className={`px-3 py-2 rounded-xl flex items-center gap-2.5 text-sm ${
-                            ci>=0 && idx===ci ? 'bg-green-50 text-green-700 font-semibold border border-green-200'
+                            idx===ci ? 'bg-green-50 text-green-700 font-semibold border border-green-200'
                             : idx===r.selected&&r.selected!==null ? 'bg-red-50 text-red-600 border border-red-200'
                             : 'text-slate-400'}`}>
                             <span className={`w-5 h-5 rounded-full flex items-center justify-center text-xs font-bold shrink-0 ${
-                              ci>=0&&idx===ci?'bg-green-200 text-green-700':idx===r.selected&&r.selected!==null?'bg-red-200 text-red-600':'bg-gray-100 text-gray-400'}`}>
+                              idx===ci?'bg-green-200 text-green-700':idx===r.selected&&r.selected!==null?'bg-red-200 text-red-600':'bg-gray-100 text-gray-400'}`}>
                               {LETTERS[idx]}
                             </span>
                             <span>{opt}</span>
-                            {ci>=0&&idx===ci && <CheckIcon s={13} c="ml-auto text-green-600 shrink-0"/>}
+                            {idx===ci && <CheckIcon s={13} c="ml-auto text-green-600 shrink-0"/>}
                             {idx===r.selected&&r.selected!==null&&idx!==ci && <XIcon s={13} c="ml-auto text-red-400 shrink-0"/>}
                           </div>
                         ))}
                       </div>
-                      {ci < 0 && (
-                        <div className="ml-8 mt-1 text-xs text-slate-400">（此題答案資料缺失）</div>
-                      )}
                       {q.explanation && (
                         <div className="mt-2 ml-8 text-xs text-amber-800 bg-amber-50 border border-amber-100 rounded-xl px-3 py-2">
                           💡 {q.explanation}
@@ -325,34 +306,36 @@ const ResultPage = ({ questions, results, mode, onHome, onRetry }) => {
 /* ─── PracticePage (隨機測驗 & 考古題) ──────────────────────────── */
 const PracticePage = ({ questions, label, onHome, onRetry }) => {
   const [idx, setIdx]     = useState(0);
-  const [sel, setSel]     = useState(null);
-  const [answered, setAns]= useState(false);
-  const [results, setRes] = useState([]);
+  const [answers, setAns] = useState({});   // qId -> selected index
   const [done, setDone]   = useState(false);
 
-  const q  = questions[idx];
-  const ci = toIdx(q.answer);
-  const progress = ((idx + (answered?1:0)) / questions.length) * 100;
+  const q        = questions[idx];
+  const ci       = ANS_IDX[q.answer];
+  const sel      = answers[q.id];           // undefined if not yet answered
+  const answered = sel !== undefined;
+  const answeredCount = Object.keys(answers).length;
+  const progress = (answeredCount / questions.length) * 100;
 
   const handleSelect = (i) => {
     if (answered) return;
-    setSel(i);
-    setAns(true);
-    setRes(prev => [...prev, { id:q.id, selected:i, correct: ci>=0 && i===ci }]);
+    setAns(prev => ({ ...prev, [q.id]: i }));
   };
 
   const handleNext = () => {
     if (idx < questions.length - 1) {
-      setIdx(i=>i+1); setSel(null); setAns(false);
+      setIdx(i => i + 1);
     } else {
       setDone(true);
     }
   };
 
-  if (done) return (
-    <ResultPage questions={questions} results={results} mode="practice"
-      onHome={onHome} onRetry={onRetry}/>
-  );
+  if (done) {
+    const results = questions.map(qn => {
+      const s = answers[qn.id];
+      return { id: qn.id, selected: s !== undefined ? s : null, correct: s === ANS_IDX[qn.answer] };
+    });
+    return <ResultPage questions={questions} results={results} mode="practice" onHome={onHome} onRetry={onRetry}/>;
+  }
 
   return (
     <div className="min-h-screen bg-gray-50">
@@ -360,40 +343,62 @@ const PracticePage = ({ questions, label, onHome, onRetry }) => {
       <div className="max-w-2xl mx-auto px-4 pt-8 pb-16">
 
         {/* Progress bar */}
-        <div className="mb-6">
+        <div className="mb-4">
           <div className="flex justify-between text-sm mb-1.5">
             <span className="text-slate-500 font-medium">{label}</span>
-            <span className="text-slate-400"><span className="font-bold text-[#1a5d43]">{idx+1}</span> / {questions.length}</span>
+            <span className="text-slate-400"><span className="font-bold text-[#1a5d43]">{answeredCount}</span> / {questions.length} 已作答</span>
           </div>
           <div className="h-2 bg-gray-200 rounded-full overflow-hidden">
             <div className="h-2 bg-[#1a5d43] rounded-full transition-all duration-500" style={{width:`${progress}%`}}/>
           </div>
         </div>
 
+        {/* Question number strip */}
+        <div className="flex flex-wrap gap-1 mb-4">
+          {questions.map((qn, i) => (
+            <button key={qn.id} onClick={() => setIdx(i)}
+              className={`shrink-0 w-7 h-7 rounded-md text-xs font-bold transition-all ${
+                i === idx                        ? 'bg-[#1a5d43] text-white'
+                : answers[qn.id] !== undefined  ? 'bg-green-100 text-green-700'
+                : 'bg-gray-100 text-slate-500 hover:bg-gray-200'
+              }`}>
+              {i + 1}
+            </button>
+          ))}
+        </div>
+
         {/* Question */}
         <div key={idx} className="bg-white rounded-2xl p-6 md:p-8 shadow-sm border border-gray-100 mb-4 pop-in">
           <div className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-3">
-            {[q.grade&&`${q.grade}年級`, q.subject, q.exam_term&&`第${q.exam_term}次段考`].filter(Boolean).join(' · ')}
+            第 {idx + 1} 題
           </div>
           <p className="text-slate-800 text-lg font-semibold leading-relaxed mb-4">{q.text}</p>
-          <QuestionImage q={q}/>
+          {q.image_url && (
+            <img src={imgSrc(q.image_url)} alt="題目附圖"
+              className="w-full max-w-lg mx-auto rounded-xl border border-gray-200 mb-4 object-contain block"/>
+          )}
+          {q.is_placeholder && !q.image_url && (
+            <div className="text-sm text-amber-700 bg-amber-50 border border-amber-200 rounded-xl px-4 py-2.5 mb-4 flex items-center gap-2">
+              <AlertIcon s={14}/> 此題含圖片，圖片尚待補充
+            </div>
+          )}
           <div className="space-y-3">
-            {(q.options||[]).map((opt,i)=>{
+            {q.options.map((opt, i) => {
               let cls = 'option-btn w-full text-left px-5 py-3.5 rounded-xl border-2 flex items-center gap-3 font-medium transition-all ';
               if (!answered) cls += 'border-gray-200 hover:border-[#1a5d43] hover:bg-green-50 cursor-pointer text-slate-700';
-              else if (ci>=0 && i===ci)  cls += 'border-green-400 bg-green-50 text-green-800';
-              else if (i===sel) cls += 'border-red-300 bg-red-50 text-red-700';
-              else              cls += 'border-gray-100 bg-gray-50 text-slate-400 opacity-60';
+              else if (i === ci)  cls += 'border-green-400 bg-green-50 text-green-800';
+              else if (i === sel) cls += 'border-red-300 bg-red-50 text-red-700';
+              else                cls += 'border-gray-100 bg-gray-50 text-slate-400 opacity-60';
               return (
-                <button key={i} className={cls} onClick={()=>handleSelect(i)}>
+                <button key={i} className={cls} onClick={() => handleSelect(i)}>
                   <span className={`w-8 h-8 rounded-full flex items-center justify-center text-sm font-bold shrink-0 transition-colors ${
-                    !answered?'bg-gray-100 text-slate-600'
-                    :ci>=0&&i===ci?'bg-green-200 text-green-800'
-                    :i===sel?'bg-red-200 text-red-700'
-                    :'bg-gray-100 text-gray-400'}`}>{LETTERS[i]}</span>
+                    !answered    ? 'bg-gray-100 text-slate-600'
+                    : i === ci  ? 'bg-green-200 text-green-800'
+                    : i === sel ? 'bg-red-200 text-red-700'
+                    : 'bg-gray-100 text-gray-400'}`}>{LETTERS[i]}</span>
                   <span>{opt}</span>
-                  {answered && ci>=0 && i===ci  && <CheckIcon s={17} c="ml-auto text-green-600 shrink-0"/>}
-                  {answered && i===sel && i!==ci && <XIcon s={17} c="ml-auto text-red-500 shrink-0"/>}
+                  {answered && i === ci  && <CheckIcon s={17} c="ml-auto text-green-600 shrink-0"/>}
+                  {answered && i === sel && i !== ci && <XIcon s={17} c="ml-auto text-red-500 shrink-0"/>}
                 </button>
               );
             })}
@@ -403,13 +408,10 @@ const PracticePage = ({ questions, label, onHome, onRetry }) => {
         {/* Result banner */}
         {answered && (
           <div className={`flex items-center gap-3 px-5 py-3.5 rounded-2xl mb-4 fade-in font-semibold text-sm ${
-            ci>=0&&sel===ci?'bg-green-100 text-green-800 border border-green-200':'bg-red-50 text-red-700 border border-red-200'}`}>
-            {ci>=0&&sel===ci
+            sel === ci ? 'bg-green-100 text-green-800 border border-green-200' : 'bg-red-50 text-red-700 border border-red-200'}`}>
+            {sel === ci
               ? <><CircleCheck s={18} c="shrink-0"/> 答對了！繼續保持 🎉</>
-              : ci>=0
-                ? <><XIcon s={16} c="shrink-0"/> 答錯了，正確答案是 <strong>{LETTERS[ci]}. {(q.options||[])[ci]}</strong></>
-                : <><AlertIcon s={16} c="shrink-0"/> 此題答案資料缺失，無法判斷正確答案</>
-            }
+              : <><XIcon s={16} c="shrink-0"/> 答錯了，正確答案是 <strong>{LETTERS[ci]}. {q.options[ci]}</strong></>}
           </div>
         )}
 
@@ -423,14 +425,20 @@ const PracticePage = ({ questions, label, onHome, onRetry }) => {
           </div>
         )}
 
-        {answered && (
-          <div className="flex justify-end fade-in">
+        {/* Navigation */}
+        <div className="flex justify-between items-center">
+          <button onClick={() => setIdx(i => i - 1)} disabled={idx === 0}
+            className="px-6 py-3 border-2 border-gray-200 rounded-2xl font-bold text-slate-600 hover:bg-gray-50 text-sm disabled:opacity-40 disabled:cursor-not-allowed transition-all">
+            ← 上一題
+          </button>
+          {answered && (
             <button onClick={handleNext}
-              className="px-8 py-3 bg-[#1a5d43] text-white rounded-2xl font-bold hover:bg-[#144a35] text-sm shadow-md shadow-green-100 transition-all">
-              {idx < questions.length-1 ? '下一題 →' : '查看結果 →'}
+              className="px-8 py-3 bg-[#1a5d43] text-white rounded-2xl font-bold hover:bg-[#144a35] text-sm shadow-md shadow-green-100 transition-all fade-in">
+              {idx < questions.length - 1 ? '下一題 →' : '查看結果 →'}
             </button>
-          </div>
-        )}
+          )}
+        </div>
+
       </div>
     </div>
   );
@@ -461,9 +469,8 @@ const ExamPage = ({ questions, label, onHome, onRetry }) => {
 
   if (submitted) {
     const results = questions.map(q => {
-      const ci  = toIdx(q.answer);
       const sel = answers[q.id] !== undefined ? answers[q.id] : null;
-      return { id:q.id, selected:sel, correct: ci>=0 && sel===ci };
+      return { id:q.id, selected:sel, correct: sel===ANS_IDX[q.answer] };
     });
     return <ResultPage questions={questions} results={results} mode="exam" onHome={onHome} onRetry={onRetry}/>;
   }
@@ -542,9 +549,17 @@ const ExamPage = ({ questions, label, onHome, onRetry }) => {
               <span>第 {curView+1} 題</span>
             </div>
             <p className="text-slate-800 text-lg font-semibold leading-relaxed mb-4">{q.text}</p>
-            <QuestionImage q={q}/>
+            {q.image_url && (
+              <img src={imgSrc(q.image_url)} alt="題目附圖"
+                className="w-full max-w-lg mx-auto rounded-xl border border-gray-200 mb-4 object-contain block"/>
+            )}
+            {q.is_placeholder && !q.image_url && (
+              <div className="text-sm text-amber-700 bg-amber-50 border border-amber-200 rounded-xl px-4 py-2.5 mb-4 flex items-center gap-2">
+                <AlertIcon s={14}/> 此題含圖片，圖片尚待補充
+              </div>
+            )}
             <div className="space-y-3">
-              {(q.options||[]).map((opt,i)=>(
+              {q.options.map((opt,i)=>(
                 <button key={i} onClick={()=>setAns(prev=>({...prev,[q.id]:i}))}
                   className={`option-btn w-full text-left px-5 py-3.5 rounded-xl border-2 flex items-center gap-3 font-medium transition-all ${
                     answers[q.id]===i
@@ -639,8 +654,7 @@ const HomePage = ({ fs, onStart, loading }) => {
         {/* Selected filters summary */}
         {(fs.grade||fs.semester||fs.exam_term||fs.subject) && (
           <div className="flex flex-wrap justify-center gap-2 mt-4 slide-down">
-            {fs.year      ? <span className="text-xs bg-slate-100 text-slate-600 px-3 py-1 rounded-full font-medium">{fs.year}學年度</span>
-                          : <span className="text-xs bg-slate-100 text-slate-600 px-3 py-1 rounded-full font-medium">全學年</span>}
+            {fs.year      && <span className="text-xs bg-slate-100 text-slate-600 px-3 py-1 rounded-full font-medium">{fs.year}學年度</span>}
             {fs.grade     && <span className="text-xs bg-green-100 text-green-700 px-3 py-1 rounded-full font-semibold">{fs.grade}年級</span>}
             {fs.semester  && <span className="text-xs bg-green-100 text-green-700 px-3 py-1 rounded-full font-semibold">{fs.semester===1?'上':'下'}學期</span>}
             {fs.exam_term && <span className="text-xs bg-green-100 text-green-700 px-3 py-1 rounded-full font-semibold">第{fs.exam_term}次段考</span>}
@@ -729,21 +743,21 @@ const HomePage = ({ fs, onStart, loading }) => {
    APP ROOT
    ═══════════════════════════════════════════════════════════════════ */
 const App = () => {
-  const [page, setPage]           = useState('home');
-  const [mode, setMode]           = useState(null);
-  const [instKey, setInstKey]     = useState(0);
+  const [page, setPage]         = useState('home');   // home | practice | exam
+  const [mode, setMode]         = useState(null);     // archive | random | exam
+  const [instKey, setInstKey]   = useState(0);
   const [questions, setQuestions] = useState([]);
-  const [loading, setLoading]     = useState(false);
-  const [error, setError]         = useState(null);
+  const [loading, setLoading]   = useState(false);
+  const [error, setError]       = useState(null);
 
-  /* year=null 表示不限學年 */
+  // ── Persistent filter state ───────────────────────────────────────
   const [fs, setFs] = useState({
-    grade: null, year: 114, semester: null, exam_term: null, subject: null,
+    grade: null, year: 114, semester: null, exam_term: null, subject: null, school: null,
   });
-
   const toggle = (key, val) =>
     setFs(prev => ({ ...prev, [key]: prev[key] === val ? null : val }));
 
+  // ── Load questions from Supabase ──────────────────────────────────
   const loadQuestions = async (m) => {
     setLoading(true);
     setError(null);
@@ -772,6 +786,7 @@ const App = () => {
     : mode === 'random' ? '隨機測驗'
     : mode === 'exam'   ? '模擬模式' : '';
 
+  // ── Render ────────────────────────────────────────────────────────
   if (page === 'practice')
     return <PracticePage key={instKey} questions={questions} label={quizLabel} onHome={goHome} onRetry={onRetry}/>;
 
